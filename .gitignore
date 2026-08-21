@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Model artifacts
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Local data
+data/raw/
+data/private/
+data/processed/
+
+# Logs
+*.log
+logs/
+
+# Evaluation outputs
+evaluation/results/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
