@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+presidio-analyzer
+presidio-anonymizer
+spacy
+faker
+cryptography
+python-dotenv
+httpx
+pytest
+pytest-asyncio
