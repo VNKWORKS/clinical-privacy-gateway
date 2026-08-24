@@ -1,0 +1,25 @@
+from app.services.gateway import ClinicalPrivacyGateway
+from app.services.mock_llm import MockLLMClient
+
+
+def test_raw_phi_never_reaches_llm():
+    llm = MockLLMClient()
+    gateway = ClinicalPrivacyGateway(llm)
+
+    raw_text = (
+        "Marcus Whitfield lives in Boston."
+    )
+
+    result = gateway.process(raw_text)
+
+    assert result["masked_text"] != raw_text
+
+    assert len(llm.received_texts) == 1
+
+    llm_input = llm.received_texts[0]
+
+    assert "Marcus Whitfield" not in llm_input
+    assert "Boston" not in llm_input
+
+    assert "Patient_001" in llm_input
+    assert "LOCATION_001" in llm_input
