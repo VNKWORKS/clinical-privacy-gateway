@@ -6,6 +6,10 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
 
+    llm_provider: str = "mock"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-5.5"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
