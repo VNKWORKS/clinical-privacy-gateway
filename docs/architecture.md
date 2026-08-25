@@ -1,417 +1,684 @@
-\# Clinical Privacy Gateway — Architecture
+# Clinical Privacy Gateway — Architecture
 
+## 1. Overview
 
+The Clinical Privacy Gateway is a privacy-preserving API layer designed to protect Protected Health Information (PHI) before clinical text is processed by a downstream Large Language Model (LLM).
 
-\## 1. System Overview
+The gateway acts as a security boundary between the application handling clinical information and the external or downstream model.
 
+The core privacy principle is:
 
+> **Raw PHI must never be sent to the downstream LLM.**
 
-The Clinical Privacy Gateway is designed as a privacy boundary between clinical applications and downstream Large Language Models.
+The system therefore follows the processing pipeline:
 
+**Detect → Validate → De-identify → Process → Rehydrate**
 
+---
 
-The system ensures that detected Protected Health Information (PHI) is replaced with safe placeholder tokens before clinical text is sent to an LLM.
+## 2. High-Level Architecture
 
+```mermaid
+flowchart TD
 
+    A[Clinical Application] -->|Clinical Text| B[FastAPI API Gateway]
 
-The original PHI is retained only inside the application's controlled mapping layer and is restored after LLM processing.
+    B --> C[PHI Detector]
 
+    C --> C1[Microsoft Presidio]
+    C --> C2[Custom PHI Recognizers]
 
+    C1 --> D[PHI Validator]
+    C2 --> D
 
-\---
+    D --> D1[Confidence Filtering]
+    D --> D2[Overlap Resolution]
+    D --> D3[Identifier Prioritization]
 
+    D --> E[De-identification Layer]
 
+    E --> F[Protected Mapping Store]
 
-\## 2. High-Level Architecture
+    E -->|De-identified Text| G[LLM Client]
 
+    G --> H[Configured LLM Provider]
 
+    H -->|LLM Response| I[Rehydrator]
+
+    F --> I
+
+    I --> J[API Response]
+
+    style G stroke-width:3px
+    style H stroke-width:3px
+```
+
+The important security boundary is between the de-identification layer and the LLM.
+
+Only de-identified text is permitted to cross that boundary.
+
+---
+
+## 3. Privacy Boundary
+
+The gateway separates sensitive clinical information from downstream model processing.
 
 ```text
+                    TRUSTED APPLICATION BOUNDARY
+
+Clinical Text
+     |
+     v
++-----------------------+
+|    PHI Detection      |
+|                       |
+| Presidio + Custom     |
+| Recognizers           |
++-----------+-----------+
+            |
+            v
++-----------------------+
+|    PHI Validation     |
+|                       |
+| Score Filtering       |
+| Overlap Resolution    |
+| Identifier Priority   |
++-----------+-----------+
+            |
+            v
++-----------------------+
+|   De-identification   |
+|                       |
+| PHI -> Safe Tokens    |
++-----------+-----------+
+            |
+            | SAFE TEXT ONLY
+            v
+================================================
+                 PRIVACY BOUNDARY
+================================================
+            |
+            v
++-----------------------+
+|      LLM Client       |
+|                       |
+| Configured Provider   |
++-----------+-----------+
+            |
+            v
++-----------------------+
+|     LLM Processing    |
+|                       |
+| Receives masked text  |
++-----------+-----------+
+            |
+            | LLM Response
+            v
++-----------------------+
+|      Rehydrator       |
+|                       |
+| Token -> Original PHI |
++-----------+-----------+
+            |
+            v
+       API Response
+```
+
+### Security Principle
+
+The LLM should receive:
+
+```text
+Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
+
+The LLM should **not** receive:
+
+```text
+Patient Marcus Whitfield was born on 14 March 1978
+and lives in Boston.
+```
+
+---
+
+## 4. Component Architecture
+
+### 4.1 API Gateway
+
+The FastAPI layer provides the external API interface.
+
+Responsibilities include:
+
+- accepting clinical text requests
+- validating API input
+- invoking the PHI protection pipeline
+- returning de-identified or processed results
+- exposing health and processing endpoints
+
+Relevant API operations include:
+
+```text
+GET  /health
+POST /api/v1/deidentify
+POST /api/v1/process
+```
+
+---
 
-&#x20;                        Clinical Application
+### 4.2 PHI Detector
 
-&#x20;                                 |
+The PHI detector identifies sensitive entities in clinical text.
 
-&#x20;                                 | Clinical Text
+The detection layer combines:
 
-&#x20;                                 v
+- Microsoft Presidio
+- built-in Presidio recognizers
+- custom PHI recognizers
 
-&#x20;                   +-----------------------------+
+This allows the gateway to detect both standard PHI categories and domain-specific clinical identifiers.
 
-&#x20;                   |     FastAPI API Gateway     |
+---
 
-&#x20;                   |                             |
+### 4.3 Custom PHI Recognizers
 
-&#x20;                   |  POST /api/v1/deidentify    |
+The project extends the standard PHI detection capability with custom recognizers for clinical identifiers that require domain-specific patterns and context.
 
-&#x20;                   |  POST /api/v1/process       |
+Examples include:
 
-&#x20;                   +-------------+---------------+
+```text
+MEDICAL_RECORD_NUMBER
+ACCOUNT_NUMBER
+HEALTH_PLAN_BENEFICIARY_NUMBER
+```
 
-&#x20;                                 |
+These recognizers are integrated into the PHI detection pipeline alongside the existing Presidio entities.
 
-&#x20;                                 v
+---
 
-&#x20;                   +-----------------------------+
+### 4.4 PHI Validator
 
-&#x20;                   |       PHI Detector          |
+The validator acts as a quality-control layer between detection and de-identification.
 
-&#x20;                   |                             |
+Its responsibilities include:
 
-&#x20;                   | Microsoft Presidio          |
+1. applying minimum confidence thresholds
+2. resolving overlapping detections
+3. prioritizing important clinical identifiers
+4. removing weak or conflicting detections
+5. selecting the most appropriate entity span
 
-&#x20;                   | Custom PHI Recognizers       |
+This layer is important because multiple recognizers can identify overlapping portions of the same text.
 
-&#x20;                   +-------------+---------------+
+For example, an identifier such as:
 
-&#x20;                                 |
+```text
+MRN PCG-4471902
+```
 
-&#x20;                                 v
+may potentially trigger more than one recognizer.
 
-&#x20;                   +-----------------------------+
+The validator ensures that the intended clinical identifier takes precedence.
 
-&#x20;                   |       PHI Validator          |
+---
 
-&#x20;                   |                             |
+### 4.5 De-identification Layer
 
-&#x20;                   | Score Filtering              |
-
-&#x20;                   | Conflict Resolution           |
-
-&#x20;                   | Identifier Prioritization     |
-
-&#x20;                   +-------------+---------------+
-
-&#x20;                                 |
-
-&#x20;                                 v
-
-&#x20;                   +-----------------------------+
-
-&#x20;                   |       Deidentifier          |
-
-&#x20;                   |                             |
-
-&#x20;                   | PHI -> Safe Tokens           |
-
-&#x20;                   |                             |
-
-&#x20;                   | Marcus Whitfield             |
-
-&#x20;                   |        -> Patient\_001        |
-
-&#x20;                   +-------------+---------------+
-
-&#x20;                                 |
-
-&#x20;                                 | SAFE / DE-IDENTIFIED TEXT
-
-&#x20;                                 v
-
-&#x20;                   +-----------------------------+
-
-&#x20;                   |       LLM Client Layer       |
-
-&#x20;                   |                             |
-
-&#x20;                   | Configurable Provider         |
-
-&#x20;                   | Mock / OpenAI                 |
-
-&#x20;                   +-------------+---------------+
-
-&#x20;                                 |
-
-&#x20;                                 v
-
-&#x20;                   +-----------------------------+
-
-&#x20;                   |       LLM Processing         |
-
-&#x20;                   |                             |
-
-&#x20;                   | Receives ONLY masked text    |
-
-&#x20;                   +-------------+---------------+
-
-&#x20;                                 |
-
-&#x20;                                 | LLM Response
-
-&#x20;                                 v
-
-&#x20;                   +-----------------------------+
-
-&#x20;                   |        Rehydrator            |
-
-&#x20;                   |                             |
-
-&#x20;                   | Safe Token -> Original PHI   |
-
-&#x20;                   +-------------+---------------+
-
-&#x20;                                 |
-
-&#x20;                                 v
-
-&#x20;                   +-----------------------------+
-
-&#x20;                   |       API Response           |
-
-&#x20;                   |                             |
-
-&#x20;                   | Final Clinical Response      |
-
-&#x20;                   +-----------------------------+
-
-
-
-
-
-
-
-&#x20;                   PRIVACY BOUNDARY
-
-&#x20;                        |
-
-&#x20;                        v
-
-
-
-Original PHI
-
-&#x20;   |
-
-&#x20;   v
-
-+------------------+
-
-| PHI Detection    |
-
-+------------------+
-
-&#x20;   |
-
-&#x20;   v
-
-+------------------+
-
-| PHI Validation   |
-
-+------------------+
-
-&#x20;   |
-
-&#x20;   v
-
-+------------------+
-
-| De-identification|
-
-+------------------+
-
-&#x20;   |
-
-&#x20;   | SAFE TEXT ONLY
-
-&#x20;   v
-
-+------------------+
-
-|      LLM         |
-
-+------------------+
-
-
-
-Original PHI never crosses
-
-the LLM boundary.
-
-
-
-Step 1 — Request
-
-
-
-A client submits clinical text to the API.
-
-
+After validation, detected PHI is replaced with safe placeholder tokens.
 
 Example:
 
-
+```text
+Original:
 
 Patient Marcus Whitfield was born on 14 March 1978
-
 and lives in Boston.
+```
 
-Step 2 — PHI Detection
+After de-identification:
 
+```text
+Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
 
+The purpose is to preserve the useful clinical structure of the text while preventing the downstream model from receiving the original sensitive values.
 
-The PHI detector analyzes the text and identifies entities such as:
+---
 
+### 4.6 Protected Mapping Store
 
+The gateway maintains the relationship between generated placeholder tokens and the original PHI values.
 
-PERSON
+Conceptually:
 
-DATE\_TIME
+```text
+Patient_001      -> Marcus Whitfield
+DATE_001         -> 14 March 1978
+LOCATION_001    -> Boston
+```
 
-LOCATION
+The mapping is kept inside the application's controlled processing layer.
 
+The mapping identifier can be used to associate the processing transaction with its corresponding mapping without exposing the mapping itself to the downstream LLM.
 
+---
 
-For example:
+### 4.7 LLM Client Layer
 
+The LLM client provides an abstraction between the privacy gateway and the downstream language model.
 
+The project supports a configurable provider architecture so that the gateway is not tightly coupled to a single model provider.
 
-Marcus Whitfield
+The important privacy requirement is:
 
-14 March 1978
+```text
+LLM input = de-identified text
+```
 
-Boston
+not:
 
-Step 3 — PHI Validation
+```text
+LLM input = original clinical text
+```
 
+---
 
+### 4.8 Rehydrator
 
-Detected entities are passed through the PHI validator.
+After the LLM has generated its response, the rehydration layer can replace recognized safe tokens with the corresponding original values from the protected mapping.
 
+Example:
 
+```text
+LLM response:
+
+Clinical summary: Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
+
+Rehydrated response:
+
+```text
+Clinical summary: Patient Marcus Whitfield was born on
+14 March 1978 and lives in Boston.
+```
+
+This step occurs **after** LLM processing.
+
+Therefore, the original PHI does not need to be provided to the LLM to generate the response.
+
+---
+
+## 5. End-to-End Workflow
+
+### Step 1 — Client Request
+
+A clinical application submits text to the gateway.
+
+Example:
+
+```text
+Patient Marcus Whitfield was born on 14 March 1978
+and lives in Boston.
+```
+
+---
+
+### Step 2 — PHI Detection
+
+The detector analyzes the text and identifies PHI entities.
+
+Example detections:
+
+```text
+PERSON      -> Marcus Whitfield
+DATE_TIME   -> 14 March 1978
+LOCATION    -> Boston
+```
+
+---
+
+### Step 3 — PHI Validation
+
+The detected entities are passed through the validation layer.
 
 The validator performs:
 
+```text
+Confidence filtering
+        +
+Overlap resolution
+        +
+Identifier prioritization
+```
 
+Only accepted detections continue to the de-identification stage.
 
-minimum confidence score filtering
+---
 
-overlapping entity resolution
+### Step 4 — De-identification
 
-identifier prioritization
+Accepted PHI is replaced with safe tokens.
 
-selection of the most appropriate PHI detection
-
-
-
-This reduces false-positive detections from overlapping recognizers.
-
-
-
-Step 4 — De-identification
-
-
-
-Detected PHI is replaced with deterministic placeholder tokens.
-
-
-
-Example:
-
-
-
+```text
 Original:
 
-
-
 Patient Marcus Whitfield was born on 14 March 1978
-
 and lives in Boston.
+```
 
+```text
+Protected:
 
+Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
 
-Becomes:
+The original values are associated with their generated tokens inside the controlled mapping layer.
 
+---
 
+### Step 5 — LLM Processing
 
-Patient Patient\_001 was born on DATE\_001
-
-and lives in LOCATION\_001.
-
-
-
-The mapping is maintained internally.
-
-
-
-Example:
-
-
-
-Patient\_001  -> Marcus Whitfield
-
-DATE\_001     -> 14 March 1978
-
-LOCATION\_001 -> Boston
-
-Step 5 — LLM Processing
-
-
-
-Only the masked text is sent to the configured LLM provider.
-
-
+The protected text is sent to the configured LLM.
 
 The LLM receives:
 
-
-
-Patient Patient\_001 was born on DATE\_001
-
-and lives in LOCATION\_001.
-
-
+```text
+Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
 
 It does not receive:
 
-
-
+```text
 Marcus Whitfield
-
 14 March 1978
-
 Boston
+```
 
-Step 6 — Response Rehydration
+This is the central privacy property of the gateway.
 
+---
 
+### Step 6 — Response Rehydration
 
 The LLM response is passed to the rehydration layer.
 
+Tokens that belong to the protected mapping can be restored to their original values.
 
+```text
+Patient_001
+    |
+    v
+Marcus Whitfield
+```
 
-Safe tokens are replaced with their original values.
+```text
+DATE_001
+    |
+    v
+14 March 1978
+```
 
+```text
+LOCATION_001
+    |
+    v
+Boston
+```
 
+---
 
-Example:
+### Step 7 — API Response
 
+The gateway returns the processed response to the requesting application.
 
+The response may also contain a mapping identifier associated with the processing transaction.
 
-LLM response:
+The mapping identifier is not the PHI itself.
 
+---
 
+## 6. Data Flow
 
-Clinical summary: Patient Patient\_001 was born on DATE\_001
+The complete data flow can be summarized as:
 
-and lives in LOCATION\_001.
+```text
+Clinical Application
+        |
+        | Original Clinical Text
+        v
+   API Gateway
+        |
+        v
+   PHI Detector
+        |
+        v
+   PHI Validator
+        |
+        v
+ De-identification
+        |
+        +--------------------+
+        |                    |
+        | Safe Text           | Protected Mapping
+        v                    v
+   LLM Client          Mapping Store
+        |
+        | Safe Text
+        v
+       LLM
+        |
+        | Response
+        v
+   Rehydrator <---------- Mapping Store
+        |
+        v
+   API Response
+```
 
+---
 
+## 7. Example Data Transformation
 
-Becomes:
+### Original Input
 
+```text
+Patient Marcus Whitfield was born on 14 March 1978
+and lives in Boston.
+```
 
+### Detected PHI
 
+```text
+PERSON      = Marcus Whitfield
+DATE_TIME   = 14 March 1978
+LOCATION    = Boston
+```
+
+### Protected Text
+
+```text
+Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
+
+### Text Sent to LLM
+
+```text
+Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
+
+### Example LLM Response
+
+```text
+Clinical summary: Patient Patient_001 was born on DATE_001
+and lives in LOCATION_001.
+```
+
+### Rehydrated Response
+
+```text
 Clinical summary: Patient Marcus Whitfield was born on
-
 14 March 1978 and lives in Boston.
+```
 
-Step 7 — API Response
+---
 
+## 8. Supported PHI Detection
 
+The project combines standard Presidio entities with custom clinical recognizers.
 
-The API returns the processed result together with the mapping identifier.
+Examples include:
 
+| PHI Category | Detection Method |
+|---|---|
+| PERSON | Presidio |
+| LOCATION | Presidio |
+| DATE_TIME | Presidio |
+| EMAIL_ADDRESS | Presidio |
+| PHONE_NUMBER | Presidio |
+| MEDICAL_RECORD_NUMBER | Custom recognizer |
+| ACCOUNT_NUMBER | Custom recognizer |
+| HEALTH_PLAN_BENEFICIARY_NUMBER | Custom recognizer |
 
+The exact set of entities is determined by the recognizers configured in the application.
 
-The mapping identifier allows the processing transaction to be referenced without exposing the mapping itself.
+---
+
+## 9. Security Properties
+
+The architecture is designed around the following security properties:
+
+### Raw PHI Isolation
+
+Original PHI is processed inside the gateway before communication with the downstream LLM.
+
+### LLM Privacy Boundary
+
+Only de-identified text should cross the gateway-to-LLM boundary.
+
+### Detection Validation
+
+PHI detections are validated before they are used for de-identification.
+
+### Identifier Prioritization
+
+Domain-specific clinical identifiers can take precedence over weaker overlapping detections.
+
+### Controlled Rehydration
+
+Original values are restored only through the application's controlled mapping process.
+
+### Mapping Separation
+
+The downstream LLM does not need access to the original PHI-to-token mapping.
+
+---
+
+## 10. Architectural Design Principles
+
+The system follows several design principles:
+
+### Separation of Responsibilities
+
+Each stage has a specific responsibility:
+
+```text
+API Gateway
+     |
+     v
+Detection
+     |
+     v
+Validation
+     |
+     v
+De-identification
+     |
+     v
+LLM Processing
+     |
+     v
+Rehydration
+```
+
+This makes the system easier to test, maintain, and extend.
+
+### Defense in Depth
+
+PHI protection does not depend on a single detection mechanism.
+
+The architecture combines:
+
+```text
+Presidio
++
+Custom Recognizers
++
+Validation
++
+Mapping Controls
++
+Privacy Boundary Tests
+```
+
+### Provider Abstraction
+
+The LLM integration is separated from the privacy pipeline so that the downstream provider can be changed without redesigning the PHI protection architecture.
+
+### Testability
+
+The architecture separates components sufficiently to allow unit, API, integration, and security-oriented tests.
+
+---
+
+## 11. Architecture Summary
+
+The Clinical Privacy Gateway can therefore be summarized as:
+
+```text
+             ORIGINAL CLINICAL TEXT
+                       |
+                       v
+                +-------------+
+                | PHI Detector|
+                +------+------+
+                       |
+                       v
+                +-------------+
+                |PHI Validator|
+                +------+------+
+                       |
+                       v
+                +-------------+
+                |De-identifier|
+                +------+------+
+                       |
+                       | SAFE TEXT ONLY
+                       v
+              =====================
+                PRIVACY BOUNDARY
+              =====================
+                       |
+                       v
+                +-------------+
+                |     LLM     |
+                +------+------+
+                       |
+                       | RESPONSE
+                       v
+                +-------------+
+                |  Rehydrator |
+                +------+------+
+                       |
+                       v
+                 API RESPONSE
+```
+
+The key architectural guarantee is:
+
+> **The downstream LLM receives de-identified clinical text rather than raw PHI.**
